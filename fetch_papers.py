@@ -3,7 +3,6 @@ import requests
 import time
 import re
 from datetime import datetime, timedelta
-from email.utils import parsedate_to_datetime
 
 # ===== 期刊配置（PubMed期刊名）=====
 JOURNALS = {
@@ -21,18 +20,17 @@ JOURNALS = {
 
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "").strip()
 
-def fetch_pubmed_papers(journal_name, days=1):
+def fetch_pubmed_papers(journal_name, days=7):
     """从PubMed获取指定期刊最近论文"""
     papers = []
     
     try:
-        # 1. 搜索该期刊最近论文
-        # 计算日期范围
+        # 放宽到最近7天
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days)
         
-        # PubMed搜索语法
-        query = f'"{journal_name}"[Journal] AND ({start_date.strftime("%Y/%m/%d")}[PDAT] : {end_date.strftime("%Y/%m/%d")}[PDAT])'
+        # 简化搜索：只按期刊名搜索最近30条，不过滤日期
+        query = f'"{journal_name}"[Journal]'
         
         search_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
         search_params = {
@@ -43,16 +41,17 @@ def fetch_pubmed_papers(journal_name, days=1):
             "retmode": "json"
         }
         
+        print(f"  Search URL: {search_url}?term={query}")
         search_response = requests.get(search_url, params=search_params, timeout=30)
         search_data = search_response.json()
         
         idlist = search_data.get("esearchresult", {}).get("idlist", [])
+        print(f"  Found {len(idlist)} PMIDs")
         
         if not idlist:
-            print(f"  No new papers from {journal_name}")
             return papers
         
-        # 2. 获取论文详情
+        # 获取论文详情
         fetch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
         fetch_params = {
             "db": "pubmed",
@@ -63,19 +62,17 @@ def fetch_pubmed_papers(journal_name, days=1):
         fetch_response = requests.get(fetch_url, params=fetch_params, timeout=30)
         xml_content = fetch_response.text
         
-        # 3. 解析XML（简单正则提取）
+        # 解析XML
         articles = re.findall(r'<PubmedArticle>(.*?)</PubmedArticle>', xml_content, re.DOTALL)
+        print(f"  Parsed {len(articles)} articles")
         
         for article in articles:
-            # 提取PMID
             pmid_match = re.search(r'<PMID[^>]*>(\d+)</PMID>', article)
             pmid = pmid_match.group(1) if pmid_match else ""
             
-            # 提取标题
             title_match = re.search(r'<ArticleTitle>(.*?)</ArticleTitle>', article, re.DOTALL)
             title = re.sub('<.*?>', '', title_match.group(1)).strip() if title_match else "No title"
             
-            # 提取摘要
             abstract_match = re.search(r'<Abstract>(.*?)</Abstract>', article, re.DOTALL)
             if abstract_match:
                 abstract_text = re.sub('<.*?>', ' ', abstract_match.group(1))
@@ -83,22 +80,22 @@ def fetch_pubmed_papers(journal_name, days=1):
             else:
                 abstract = ""
             
-            # 提取作者
             authors = []
             author_list = re.findall(r'<Author[^>]*>.*?</Author>', article, re.DOTALL)
-            for author in author_list[:3]:  # 只取前3个
+            for author in author_list[:3]:
                 lastname = re.search(r'<LastName>(.*?)</LastName>', author)
                 if lastname:
                     authors.append(lastname.group(1))
             
             authors_str = ", ".join(authors) if authors else "Unknown"
             
-            # 提取发表日期
             date_match = re.search(r'<PubDate>.*?<Year>(\d{4})</Year>.*?<Month>(\d{1,2}|[A-Za-z]+)</Month>.*?<Day>(\d{1,2})</Day>.*?</PubDate>', article, re.DOTALL)
             if date_match:
                 pub_date = f"{date_match.group(1)}-{date_match.group(2)}-{date_match.group(3)}"
             else:
-                pub_date = ""
+                # 尝试只取年月
+                ym_match = re.search(r'<PubDate>.*?<Year>(\d{4})</Year>.*?<Month>(\d{1,2}|[A-Za-z]+)</Month>.*?</PubDate>', article, re.DOTALL)
+                pub_date = f"{ym_match.group(1)}-{ym_match.group(2)}" if ym_match else ""
             
             papers.append({
                 "title": title,
@@ -110,7 +107,9 @@ def fetch_pubmed_papers(journal_name, days=1):
             })
             
     except Exception as e:
-        print(f"Error fetching {journal_name}: {e}")
+        print(f"  Error: {e}")
+        import traceback
+        traceback.print_exc()
     
     return papers
 
@@ -222,17 +221,14 @@ def main():
     
     for journal_key, journal_name in JOURNALS.items():
         print(f"Fetching from {journal_key}...")
-        papers = fetch_pubmed_papers(journal_name, days=1)
+        papers = fetch_pubmed_papers(journal_name, days=7)
         
-        # 调用AI摘要
         for paper in papers:
             paper["summary"] = ai_summary(paper["title"], paper["abstract"])
-            time.sleep(0.5)  # API频率限制
+            time.sleep(0.5)
         
         all_papers.extend(papers)
         print(f"  Fetched {len(papers)} from {journal_key}")
-        
-        # PubMed API有频率限制，间隔1秒
         time.sleep(1)
     
     # 去重
