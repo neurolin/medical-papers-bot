@@ -3,7 +3,6 @@ import requests
 import feedparser
 import re
 from datetime import datetime
-from notion_client import Client
 
 # ===== 期刊RSS配置 =====
 JOURNALS = {
@@ -17,7 +16,6 @@ JOURNALS = {
 }
 
 def simple_summarize(text, max_sentences=3):
-    """提取前几句作为摘要总结"""
     if not text:
         return "无摘要"
     
@@ -32,14 +30,24 @@ def simple_summarize(text, max_sentences=3):
     
     return summary
 
-def get_notion_client():
-    token = os.environ["NOTION_TOKEN"]
-    # 清理token中的非法字符（换行、空格等）
-    token = token.strip()
-    return Client(auth=token)
+def notion_api_call(token, method, endpoint, data=None):
+    """直接调用 Notion REST API"""
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28"
+    }
+    
+    url = f"https://api.notion.com/v1/{endpoint}"
+    
+    if method == "GET":
+        response = requests.get(url, headers=headers)
+    elif method == "POST":
+        response = requests.post(url, headers=headers, json=data)
+    
+    return response
 
 def fetch_papers_from_rss(rss_url, journal_name):
-    """从RSS源获取论文"""
     papers = []
     try:
         feed = feedparser.parse(rss_url)
@@ -51,7 +59,6 @@ def fetch_papers_from_rss(rss_url, journal_name):
                 "authors": entry.get("author", "Unknown"),
                 "url": entry.get("link", ""),
                 "published": entry.get("published", ""),
-                "raw_summary": raw_summary,
                 "summary": simple_summarize(raw_summary),
                 "journal": journal_name
             }
@@ -60,30 +67,41 @@ def fetch_papers_from_rss(rss_url, journal_name):
         print(f"Error fetching {journal_name}: {e}")
     return papers
 
-def add_to_notion(notion, database_id, paper):
-    """添加论文到Notion数据库"""
-    try:
-        notion.pages.create(
-            parent={"database_id": database_id},
-            properties={
-                "Title": {"title": [{"text": {"content": paper["title"]}}]},
-                "Journal": {"select": {"name": paper["journal"]}},
-                "Authors": {"rich_text": [{"text": {"content": paper["authors"][:100]}}]},
-                "URL": {"url": paper["url"]},
-                "Published": {"date": {"start": datetime.now().isoformat()}},
-                "Summary": {"rich_text": [{"text": {"content": paper["summary"]}}]},
-                "Status": {"select": {"name": "New"}}
-            }
-        )
+def add_to_notion(token, database_id, paper):
+    """直接调用 API 添加页面"""
+    data = {
+        "parent": {"database_id": database_id},
+        "properties": {
+            "Title": {"title": [{"text": {"content": paper["title"]}}]},
+            "Journal": {"select": {"name": paper["journal"]}},
+            "Authors": {"rich_text": [{"text": {"content": paper["authors"][:100]}}]},
+            "URL": {"url": paper["url"]},
+            "Published": {"date": {"start": datetime.now().isoformat()}},
+            "Summary": {"rich_text": [{"text": {"content": paper["summary"]}}]},
+            "Status": {"select": {"name": "New"}}
+        }
+    }
+    
+    response = notion_api_call(token, "POST", "pages", data)
+    
+    if response.status_code == 200:
         print(f"Added: {paper['title'][:50]}...")
         return True
-    except Exception as e:
-        print(f"Error adding to Notion: {e}")
+    else:
+        print(f"Error: {response.status_code} - {response.text}")
         return False
 
 def main():
-    notion = get_notion_client()
-    db_id = os.environ["NOTION_DATABASE_ID"].strip()  # 清理可能的空格
+    token = os.environ["NOTION_TOKEN"].strip()
+    db_id = os.environ["NOTION_DATABASE_ID"].strip()
+    
+    # 测试数据库连接
+    print("Testing database connection...")
+    test = notion_api_call(token, "GET", f"databases/{db_id}")
+    print(f"Database check: {test.status_code}")
+    if test.status_code != 200:
+        print(f"Database error: {test.text}")
+        return
     
     all_papers = []
     
@@ -105,7 +123,7 @@ def main():
     # 添加到Notion
     added_count = 0
     for paper in unique_papers:
-        if add_to_notion(notion, db_id, paper):
+        if add_to_notion(token, db_id, paper):
             added_count += 1
     
     print(f"\nDone! Added {added_count} papers to Notion.")
