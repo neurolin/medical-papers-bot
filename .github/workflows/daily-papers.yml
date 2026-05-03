@@ -24,4 +24,5 @@ jobs:
       - name: Run paper fetcher
         env:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: python fetch_papers.py
