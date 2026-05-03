@@ -17,12 +17,9 @@ jobs:
         with:
           python-version: '3.11'
           
-      - name: List files (debug)
-        run: ls -la
-          
       - name: Install dependencies
         run: |
-          pip install requests feedparser beautifulsoup4 notion-client
+          pip install requests feedparser beautifulsoup4
           
       - name: Run paper fetcher
         env:
