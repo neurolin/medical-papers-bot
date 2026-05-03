@@ -2,6 +2,7 @@ import os
 import requests
 import feedparser
 import re
+import time
 from datetime import datetime
 
 # ===== 期刊RSS配置 =====
@@ -43,54 +44,61 @@ def fetch_papers_from_rss(rss_url, journal_name):
         print(f"Error fetching {journal_name}: {e}")
     return papers
 
-def send_feishu(webhook_url, papers):
-    """发送文本消息到飞书"""
-    
+def send_feishu_batch(webhook_url, papers):
+    """分批发送，每批最多5篇"""
     date_str = datetime.now().strftime("%Y-%m-%d")
     
-    # 构建文本内容
-    lines = [f"📚 医学文献日报 - {date_str}\n"]
+    # 按期刊分组
+    batches = []
+    current_batch = [f"📚 医学文献日报 - {date_str}\n"]
+    current_count = 0
     
     current_journal = ""
     for paper in papers:
+        # 新期刊开头
         if paper["journal"] != current_journal:
             current_journal = paper["journal"]
-            lines.append(f"\n📖 {current_journal}")
+            current_batch.append(f"\n📖 {current_journal}")
         
-        # 飞书文本消息，不要复杂格式
-        lines.append(f"📌 {paper['title']}")
-        lines.append(f"👤 {paper['authors']}")
-        lines.append(f"📝 {paper['summary'][:200]}...")  # 限制长度
-        lines.append(f"🔗 {paper['url']}")
-        lines.append("")  # 空行分隔
+        # 添加论文
+        paper_text = f"\n📌 {paper['title']}\n👤 {paper['authors']}\n📝 {paper['summary'][:150]}...\n🔗 {paper['url']}"
+        current_batch.append(paper_text)
+        current_count += 1
+        
+        # 每5篇发一次
+        if current_count >= 5:
+            batches.append("\n".join(current_batch))
+            current_batch = []
+            current_count = 0
     
-    # 合并文本，注意飞书限制4096字符
-    full_text = "\n".join(lines)
-    if len(full_text) > 4000:
-        full_text = full_text[:4000] + "\n\n...(内容过长，已截断)"
+    # 最后一批
+    if current_batch:
+        batches.append("\n".join(current_batch))
     
-    # 飞书文本消息格式
-    message = {
-        "msg_type": "text",
-        "content": {
-            "text": full_text
+    # 逐批发送
+    for i, batch in enumerate(batches, 1):
+        message = {
+            "msg_type": "text",
+            "content": {"text": batch}
         }
-    }
-    
-    try:
-        response = requests.post(webhook_url, json=message, timeout=10)
-        result = response.json()
         
-        if result.get("code") == 0:
-            print(f"✅ 飞书推送成功！共 {len(papers)} 篇文献")
-            return True
-        else:
-            print(f"❌ 飞书推送失败: {result}")
-            return False
+        try:
+            response = requests.post(webhook_url, json=message, timeout=10)
+            result = response.json()
             
-    except Exception as e:
-        print(f"❌ 请求失败: {e}")
-        return False
+            if result.get("code") == 0:
+                print(f"✅ 第 {i}/{len(batches)} 批发送成功")
+            else:
+                print(f"❌ 第 {i} 批失败: {result}")
+                
+        except Exception as e:
+            print(f"❌ 请求失败: {e}")
+        
+        # 飞书有频率限制，间隔1秒
+        if i < len(batches):
+            time.sleep(1)
+    
+    print(f"\n✅ 全部发送完成！共 {len(papers)} 篇文献，分 {len(batches)} 条消息")
 
 def main():
     all_papers = []
@@ -119,7 +127,7 @@ def main():
         print("❌ 未配置 FEISHU_WEBHOOK")
         return
     
-    send_feishu(webhook, unique_papers)
+    send_feishu_batch(webhook, unique_papers)
 
 if __name__ == "__main__":
     main()
