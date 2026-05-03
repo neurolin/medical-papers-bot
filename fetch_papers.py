@@ -44,42 +44,39 @@ def fetch_papers_from_rss(rss_url, journal_name):
     return papers
 
 def send_feishu(webhook_url, papers):
-    """发送富文本消息到飞书"""
+    """发送文本消息到飞书"""
     
-    # 构建消息内容
     date_str = datetime.now().strftime("%Y-%m-%d")
     
-    # 按期刊分组构建内容
-    content = []
-    current_journal = ""
+    # 构建文本内容
+    lines = [f"📚 医学文献日报 - {date_str}\n"]
     
+    current_journal = ""
     for paper in papers:
         if paper["journal"] != current_journal:
             current_journal = paper["journal"]
-            content.append([
-                {"tag": "text", "text": f"\n📖 {current_journal}\n", "style": {"bold": True}}
-            ])
+            lines.append(f"\n📖 {current_journal}")
         
-        # 每条论文一个段落
-        paper_text = f"📌 {paper['title']}\n👤 {paper['authors']}\n📝 {paper['summary']}\n🔗 阅读原文\n\n"
-        content.append([
-            {"tag": "text", "text": paper_text}
-        ])
+        # 飞书文本消息，不要复杂格式
+        lines.append(f"📌 {paper['title']}")
+        lines.append(f"👤 {paper['authors']}")
+        lines.append(f"📝 {paper['summary'][:200]}...")  # 限制长度
+        lines.append(f"🔗 {paper['url']}")
+        lines.append("")  # 空行分隔
     
-    # 飞书富文本消息
+    # 合并文本，注意飞书限制4096字符
+    full_text = "\n".join(lines)
+    if len(full_text) > 4000:
+        full_text = full_text[:4000] + "\n\n...(内容过长，已截断)"
+    
+    # 飞书文本消息格式
     message = {
-        "msg_type": "post",
+        "msg_type": "text",
         "content": {
-            "post": {
-                "zh_cn": {
-                    "title": f"📚 医学文献日报 - {date_str}",
-                    "content": content
-                }
-            }
+            "text": full_text
         }
     }
     
-    # 如果论文太多，飞书消息有长度限制，分批发送
     try:
         response = requests.post(webhook_url, json=message, timeout=10)
         result = response.json()
@@ -117,9 +114,7 @@ def main():
         print("No papers found today.")
         return
     
-    # 推送到飞书
     webhook = os.environ.get("FEISHU_WEBHOOK", "").strip()
-    
     if not webhook:
         print("❌ 未配置 FEISHU_WEBHOOK")
         return
