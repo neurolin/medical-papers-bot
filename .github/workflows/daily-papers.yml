@@ -10,15 +10,15 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-      # 手动checkout，绕过actions/checkout
-      - name: Checkout code
-        run: |
-          git clone --depth 1 https://github.com/${{ github.repository }}.git .
-          
+      - uses: actions/checkout@v4
+      
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          
+      - name: List files (debug)
+        run: ls -la
           
       - name: Install dependencies
         run: |
