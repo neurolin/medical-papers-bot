@@ -2,22 +2,18 @@ name: Daily Medical Papers
 
 on:
   schedule:
-    - cron: '0 6 * * *'  # 每天早上6点运行（UTC时间）
-  workflow_dispatch:  # 支持手动触发
-
-# 强制使用Node.js 24，消除警告
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    - cron: '0 6 * * *'
+  workflow_dispatch:
 
 jobs:
   fetch-papers:
     runs-on: ubuntu-latest
     
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2  # ← 改成带小版本号
       
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v5.6.0  # ← 改成带小版本号
         with:
           python-version: '3.11'
           
