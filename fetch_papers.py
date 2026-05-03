@@ -25,11 +25,7 @@ def fetch_pubmed_papers(journal_name, days=7):
     papers = []
     
     try:
-        # 放宽到最近7天
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=days)
-        
-        # 简化搜索：只按期刊名搜索最近30条，不过滤日期
+        # 简化搜索：只按期刊名搜索最近10条
         query = f'"{journal_name}"[Journal]'
         
         search_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
@@ -41,7 +37,6 @@ def fetch_pubmed_papers(journal_name, days=7):
             "retmode": "json"
         }
         
-        print(f"  Search URL: {search_url}?term={query}")
         search_response = requests.get(search_url, params=search_params, timeout=30)
         search_data = search_response.json()
         
@@ -51,7 +46,7 @@ def fetch_pubmed_papers(journal_name, days=7):
         if not idlist:
             return papers
         
-        # 获取论文详情
+        # 获取论文详情 - 用efetch获取完整XML
         fetch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
         fetch_params = {
             "db": "pubmed",
@@ -62,24 +57,44 @@ def fetch_pubmed_papers(journal_name, days=7):
         fetch_response = requests.get(fetch_url, params=fetch_params, timeout=30)
         xml_content = fetch_response.text
         
-        # 解析XML
+        # 解析每篇文章
         articles = re.findall(r'<PubmedArticle>(.*?)</PubmedArticle>', xml_content, re.DOTALL)
         print(f"  Parsed {len(articles)} articles")
         
         for article in articles:
+            # PMID
             pmid_match = re.search(r'<PMID[^>]*>(\d+)</PMID>', article)
             pmid = pmid_match.group(1) if pmid_match else ""
             
+            # 标题
             title_match = re.search(r'<ArticleTitle>(.*?)</ArticleTitle>', article, re.DOTALL)
             title = re.sub('<.*?>', '', title_match.group(1)).strip() if title_match else "No title"
             
-            abstract_match = re.search(r'<Abstract>(.*?)</Abstract>', article, re.DOTALL)
-            if abstract_match:
-                abstract_text = re.sub('<.*?>', ' ', abstract_match.group(1))
-                abstract = ' '.join(abstract_text.split())
-            else:
-                abstract = ""
+            # 摘要 - 改进提取逻辑
+            abstract = ""
             
+            # 方法1：找Abstract标签内的所有AbstractText
+            abstract_texts = re.findall(r'<AbstractText[^>]*>(.*?)</AbstractText>', article, re.DOTALL)
+            if abstract_texts:
+                abstract = ' '.join([re.sub('<.*?>', ' ', t).strip() for t in abstract_texts])
+            
+            # 方法2：如果没有AbstractText，找整个Abstract内容
+            if not abstract:
+                abstract_match = re.search(r'<Abstract>(.*?)</Abstract>', article, re.DOTALL)
+                if abstract_match:
+                    abstract = re.sub('<.*?>', ' ', abstract_match.group(1))
+                    abstract = ' '.join(abstract.split())
+            
+            # 方法3：找OtherAbstract（其他类型摘要）
+            if not abstract:
+                other_abstract = re.search(r'<OtherAbstract[^>]*>(.*?)</OtherAbstract>', article, re.DOTALL)
+                if other_abstract:
+                    abstract = re.sub('<.*?>', ' ', other_abstract.group(1))
+                    abstract = ' '.join(abstract.split())
+            
+            print(f"  PMID {pmid}: abstract length = {len(abstract)}")
+            
+            # 作者
             authors = []
             author_list = re.findall(r'<Author[^>]*>.*?</Author>', article, re.DOTALL)
             for author in author_list[:3]:
@@ -89,11 +104,12 @@ def fetch_pubmed_papers(journal_name, days=7):
             
             authors_str = ", ".join(authors) if authors else "Unknown"
             
+            # 日期
+            pub_date = ""
             date_match = re.search(r'<PubDate>.*?<Year>(\d{4})</Year>.*?<Month>(\d{1,2}|[A-Za-z]+)</Month>.*?<Day>(\d{1,2})</Day>.*?</PubDate>', article, re.DOTALL)
             if date_match:
                 pub_date = f"{date_match.group(1)}-{date_match.group(2)}-{date_match.group(3)}"
             else:
-                # 尝试只取年月
                 ym_match = re.search(r'<PubDate>.*?<Year>(\d{4})</Year>.*?<Month>(\d{1,2}|[A-Za-z]+)</Month>.*?</PubDate>', article, re.DOTALL)
                 pub_date = f"{ym_match.group(1)}-{ym_match.group(2)}" if ym_match else ""
             
@@ -118,7 +134,8 @@ def ai_summary(title, abstract):
     if not DEEPSEEK_API_KEY:
         return "【未配置API】"
     
-    if not abstract or len(abstract) < 50:
+    # 降低阈值，只要摘要超过20字就尝试提炼
+    if not abstract or len(abstract) < 20:
         return "摘要过短，无法提炼"
     
     clean_abstract = abstract[:2000]
