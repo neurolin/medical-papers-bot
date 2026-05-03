@@ -1,6 +1,7 @@
 import os
 import requests
 import feedparser
+import re
 from datetime import datetime
 from notion_client import Client
 
@@ -15,37 +16,34 @@ JOURNALS = {
     "Circulation": "https://www.ahajournals.org/action/showFeed?type=etoc&feed=rss&jc=circulation",
 }
 
-# ===== 简单的文本摘要函数（不需要AI API）=====
 def simple_summarize(text, max_sentences=3):
     """提取前几句作为摘要总结"""
     if not text:
         return "无摘要"
     
-    # 清理HTML标签
-    import re
     clean = re.sub('<.*?>', '', text)
     clean = clean.replace('\n', ' ').strip()
     
-    # 按句子分割，取前3句
     sentences = re.split(r'(?<=[.!?])\s+', clean)
     summary = ' '.join(sentences[:max_sentences])
     
-    # 如果太长，截断
     if len(summary) > 800:
         summary = summary[:800] + "..."
     
     return summary
 
 def get_notion_client():
-    return Client(auth=os.environ["NOTION_TOKEN"])
+    token = os.environ["NOTION_TOKEN"]
+    # 清理token中的非法字符（换行、空格等）
+    token = token.strip()
+    return Client(auth=token)
 
 def fetch_papers_from_rss(rss_url, journal_name):
     """从RSS源获取论文"""
     papers = []
     try:
         feed = feedparser.parse(rss_url)
-        for entry in feed.entries[:10]:  # 每个期刊取最近10篇
-            # 获取原始摘要
+        for entry in feed.entries[:10]:
             raw_summary = entry.get("summary", "")
             
             paper = {
@@ -54,7 +52,7 @@ def fetch_papers_from_rss(rss_url, journal_name):
                 "url": entry.get("link", ""),
                 "published": entry.get("published", ""),
                 "raw_summary": raw_summary,
-                "summary": simple_summarize(raw_summary),  # 生成总结
+                "summary": simple_summarize(raw_summary),
                 "journal": journal_name
             }
             papers.append(paper)
@@ -85,17 +83,16 @@ def add_to_notion(notion, database_id, paper):
 
 def main():
     notion = get_notion_client()
-    db_id = os.environ["NOTION_DATABASE_ID"]
+    db_id = os.environ["NOTION_DATABASE_ID"].strip()  # 清理可能的空格
     
     all_papers = []
     
-    # 获取所有期刊论文（不过滤，全部保留）
     for journal, rss_url in JOURNALS.items():
         papers = fetch_papers_from_rss(rss_url, journal)
         all_papers.extend(papers)
         print(f"Fetched {len(papers)} from {journal}")
     
-    # 去重（按URL）
+    # 去重
     seen_urls = set()
     unique_papers = []
     for p in all_papers:
