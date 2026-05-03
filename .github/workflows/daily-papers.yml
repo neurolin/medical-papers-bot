@@ -1,0 +1,28 @@
+name: Daily Medical Papers
+
+on:
+  schedule:
+    - cron: '0 6 * * *'  # 每天早上6点运行（UTC时间，北京时间14点）
+  workflow_dispatch:  # 也支持手动触发
+
+jobs:
+  fetch-papers:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          
+      - name: Install dependencies
+        run: |
+          pip install requests feedparser beautifulsoup4 notion-client
+          
+      - name: Run paper fetcher
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+        run: python fetch_papers.py
