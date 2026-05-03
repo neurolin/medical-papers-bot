@@ -18,91 +18,84 @@ JOURNALS = {
 def simple_summarize(text, max_sentences=3):
     if not text:
         return "无摘要"
-    
     clean = re.sub('<.*?>', '', text)
     clean = clean.replace('\n', ' ').strip()
-    
     sentences = re.split(r'(?<=[.!?])\s+', clean)
     summary = ' '.join(sentences[:max_sentences])
-    
     if len(summary) > 800:
         summary = summary[:800] + "..."
-    
     return summary
-
-def notion_api_call(token, method, endpoint, data=None):
-    """直接调用 Notion REST API"""
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-        "Notion-Version": "2022-06-28"
-    }
-    
-    url = f"https://api.notion.com/v1/{endpoint}"
-    
-    if method == "GET":
-        response = requests.get(url, headers=headers)
-    elif method == "POST":
-        response = requests.post(url, headers=headers, json=data)
-    
-    return response
 
 def fetch_papers_from_rss(rss_url, journal_name):
     papers = []
     try:
         feed = feedparser.parse(rss_url)
         for entry in feed.entries[:10]:
-            raw_summary = entry.get("summary", "")
-            
-            paper = {
+            papers.append({
                 "title": entry.get("title", "No title"),
                 "authors": entry.get("author", "Unknown"),
                 "url": entry.get("link", ""),
                 "published": entry.get("published", ""),
-                "summary": simple_summarize(raw_summary),
+                "summary": simple_summarize(entry.get("summary", "")),
                 "journal": journal_name
-            }
-            papers.append(paper)
+            })
     except Exception as e:
         print(f"Error fetching {journal_name}: {e}")
     return papers
 
-def add_to_notion(token, database_id, paper):
-    """直接调用 API 添加页面"""
-    data = {
-        "parent": {"database_id": database_id},
-        "properties": {
-            "Title": {"title": [{"text": {"content": paper["title"]}}]},
-            "Journal": {"select": {"name": paper["journal"]}},
-            "Authors": {"rich_text": [{"text": {"content": paper["authors"][:100]}}]},
-            "URL": {"url": paper["url"]},
-            "Published": {"date": {"start": datetime.now().isoformat()}},
-            "Summary": {"rich_text": [{"text": {"content": paper["summary"]}}]},
-            "Status": {"select": {"name": "New"}}
+def send_feishu(webhook_url, papers):
+    """发送富文本消息到飞书"""
+    
+    # 构建消息内容
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    
+    # 按期刊分组构建内容
+    content = []
+    current_journal = ""
+    
+    for paper in papers:
+        if paper["journal"] != current_journal:
+            current_journal = paper["journal"]
+            content.append([
+                {"tag": "text", "text": f"\n📖 {current_journal}\n", "style": {"bold": True}}
+            ])
+        
+        # 每条论文一个段落
+        paper_text = f"📌 {paper['title']}\n👤 {paper['authors']}\n📝 {paper['summary']}\n🔗 阅读原文\n\n"
+        content.append([
+            {"tag": "text", "text": paper_text}
+        ])
+    
+    # 飞书富文本消息
+    message = {
+        "msg_type": "post",
+        "content": {
+            "post": {
+                "zh_cn": {
+                    "title": f"📚 医学文献日报 - {date_str}",
+                    "content": content
+                }
+            }
         }
     }
     
-    response = notion_api_call(token, "POST", "pages", data)
-    
-    if response.status_code == 200:
-        print(f"Added: {paper['title'][:50]}...")
-        return True
-    else:
-        print(f"Error: {response.status_code} - {response.text}")
+    # 如果论文太多，飞书消息有长度限制，分批发送
+    try:
+        response = requests.post(webhook_url, json=message, timeout=10)
+        result = response.json()
+        
+        if result.get("code") == 0:
+            print(f"✅ 飞书推送成功！共 {len(papers)} 篇文献")
+            return True
+        else:
+            print(f"❌ 飞书推送失败: {result}")
+            return False
+            
+    except Exception as e:
+        print(f"❌ 请求失败: {e}")
         return False
 
 def main():
-    token = os.environ["NOTION_TOKEN"].strip()
-    db_id = os.environ["NOTION_DATABASE_ID"].strip()
-    
-    # 测试数据库连接
-    print("Testing database connection...")
-    test = notion_api_call(token, "GET", f"databases/{db_id}")
-    print(f"Database check: {test.status_code}")
-    if test.status_code != 200:
-        print(f"Database error: {test.text}")
-        return
-    
     all_papers = []
     
     for journal, rss_url in JOURNALS.items():
@@ -120,13 +113,18 @@ def main():
     
     print(f"\nTotal unique papers: {len(unique_papers)}")
     
-    # 添加到Notion
-    added_count = 0
-    for paper in unique_papers:
-        if add_to_notion(token, db_id, paper):
-            added_count += 1
+    if not unique_papers:
+        print("No papers found today.")
+        return
     
-    print(f"\nDone! Added {added_count} papers to Notion.")
+    # 推送到飞书
+    webhook = os.environ.get("FEISHU_WEBHOOK", "").strip()
+    
+    if not webhook:
+        print("❌ 未配置 FEISHU_WEBHOOK")
+        return
+    
+    send_feishu(webhook, unique_papers)
 
 if __name__ == "__main__":
     main()
