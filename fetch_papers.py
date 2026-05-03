@@ -1,132 +1,48 @@
 import os
 import requests
-import time
+import feedparser
 import re
-from datetime import datetime, timedelta
+import time
+from datetime import datetime
 
-# ===== 期刊配置（PubMed期刊名）=====
+# ===== 期刊RSS配置 =====
 JOURNALS = {
-    "NEJM": "N Engl J Med",
-    "Lancet": "Lancet",
-    "JAMA": "JAMA",
-    "BMJ": "BMJ",
-    "Stroke": "Stroke",
-    "Neurology": "Neurology",
-    "Circulation": "Circulation",
-    "Practical Neurology": "Pract Neurol",
-    "Movement Disorders": "Mov Disord",
-    "Movement Disorders Clinical Practice": "Mov Disord Clin Pract",
+    "NEJM": "https://www.nejm.org/rss/medical-articles.xml",
+    "Lancet": "https://www.thelancet.com/rssfeed/lancet_current.xml",
+    "JAMA": "https://jamanetwork.com/rss/site_3/67.xml",
+    "BMJ": "https://www.bmj.com/rss/research.xml",
+    "Stroke": "https://www.ahajournals.org/action/showFeed?type=etoc&feed=rss&jc=stroke",
+    "Neurology": "https://n.neurology.org/rss/current.xml",
+    "Circulation": "https://www.ahajournals.org/action/showFeed?type=etoc&feed=rss&jc=circulation",
+    "Practical Neurology": "https://pn.bmj.com/rss/current.xml",
+    "Movement Disorders": "https://movementdisorders.onlinelibrary.wiley.com/feed",
+    "Movement Disorders Clinical Practice": "https://onlinelibrary.wiley.com/feed/23308915",
 }
 
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "").strip()
 
-def fetch_pubmed_papers(journal_name, days=7):
-    """从PubMed获取指定期刊最近论文"""
+def fetch_papers_from_rss(rss_url, journal_name):
+    """从RSS源获取论文"""
     papers = []
-    
     try:
-        # 简化搜索：只按期刊名搜索最近10条
-        query = f'"{journal_name}"[Journal]'
-        
-        search_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
-        search_params = {
-            "db": "pubmed",
-            "term": query,
-            "retmax": 10,
-            "sort": "date",
-            "retmode": "json"
-        }
-        
-        search_response = requests.get(search_url, params=search_params, timeout=30)
-        search_data = search_response.json()
-        
-        idlist = search_data.get("esearchresult", {}).get("idlist", [])
-        print(f"  Found {len(idlist)} PMIDs")
-        
-        if not idlist:
-            return papers
-        
-        # 获取论文详情 - 用efetch获取完整XML
-        fetch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
-        fetch_params = {
-            "db": "pubmed",
-            "id": ",".join(idlist),
-            "retmode": "xml"
-        }
-        
-        fetch_response = requests.get(fetch_url, params=fetch_params, timeout=30)
-        xml_content = fetch_response.text
-        
-        # 解析每篇文章
-        articles = re.findall(r'<PubmedArticle>(.*?)</PubmedArticle>', xml_content, re.DOTALL)
-        print(f"  Parsed {len(articles)} articles")
-        
-        for article in articles:
-            # PMID
-            pmid_match = re.search(r'<PMID[^>]*>(\d+)</PMID>', article)
-            pmid = pmid_match.group(1) if pmid_match else ""
+        feed = feedparser.parse(rss_url)
+        for entry in feed.entries[:10]:
+            raw_summary = entry.get("summary", "")
             
-            # 标题
-            title_match = re.search(r'<ArticleTitle>(.*?)</ArticleTitle>', article, re.DOTALL)
-            title = re.sub('<.*?>', '', title_match.group(1)).strip() if title_match else "No title"
+            # 清理HTML标签
+            clean_summary = re.sub('<.*?>', '', raw_summary).strip()
             
-            # 摘要 - 改进提取逻辑
-            abstract = ""
-            
-            # 方法1：找Abstract标签内的所有AbstractText
-            abstract_texts = re.findall(r'<AbstractText[^>]*>(.*?)</AbstractText>', article, re.DOTALL)
-            if abstract_texts:
-                abstract = ' '.join([re.sub('<.*?>', ' ', t).strip() for t in abstract_texts])
-            
-            # 方法2：如果没有AbstractText，找整个Abstract内容
-            if not abstract:
-                abstract_match = re.search(r'<Abstract>(.*?)</Abstract>', article, re.DOTALL)
-                if abstract_match:
-                    abstract = re.sub('<.*?>', ' ', abstract_match.group(1))
-                    abstract = ' '.join(abstract.split())
-            
-            # 方法3：找OtherAbstract（其他类型摘要）
-            if not abstract:
-                other_abstract = re.search(r'<OtherAbstract[^>]*>(.*?)</OtherAbstract>', article, re.DOTALL)
-                if other_abstract:
-                    abstract = re.sub('<.*?>', ' ', other_abstract.group(1))
-                    abstract = ' '.join(abstract.split())
-            
-            print(f"  PMID {pmid}: abstract length = {len(abstract)}")
-            
-            # 作者
-            authors = []
-            author_list = re.findall(r'<Author[^>]*>.*?</Author>', article, re.DOTALL)
-            for author in author_list[:3]:
-                lastname = re.search(r'<LastName>(.*?)</LastName>', author)
-                if lastname:
-                    authors.append(lastname.group(1))
-            
-            authors_str = ", ".join(authors) if authors else "Unknown"
-            
-            # 日期
-            pub_date = ""
-            date_match = re.search(r'<PubDate>.*?<Year>(\d{4})</Year>.*?<Month>(\d{1,2}|[A-Za-z]+)</Month>.*?<Day>(\d{1,2})</Day>.*?</PubDate>', article, re.DOTALL)
-            if date_match:
-                pub_date = f"{date_match.group(1)}-{date_match.group(2)}-{date_match.group(3)}"
-            else:
-                ym_match = re.search(r'<PubDate>.*?<Year>(\d{4})</Year>.*?<Month>(\d{1,2}|[A-Za-z]+)</Month>.*?</PubDate>', article, re.DOTALL)
-                pub_date = f"{ym_match.group(1)}-{ym_match.group(2)}" if ym_match else ""
-            
-            papers.append({
-                "title": title,
-                "authors": authors_str,
-                "url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
-                "published": pub_date,
-                "abstract": abstract,
+            paper = {
+                "title": entry.get("title", "No title"),
+                "authors": entry.get("author", "Unknown"),
+                "url": entry.get("link", ""),
+                "published": entry.get("published", ""),
+                "abstract": clean_summary,
                 "journal": journal_name
-            })
-            
+            }
+            papers.append(paper)
     except Exception as e:
-        print(f"  Error: {e}")
-        import traceback
-        traceback.print_exc()
-    
+        print(f"Error fetching {journal_name}: {e}")
     return papers
 
 def ai_summary(title, abstract):
@@ -134,7 +50,6 @@ def ai_summary(title, abstract):
     if not DEEPSEEK_API_KEY:
         return "【未配置API】"
     
-    # 降低阈值，只要摘要超过20字就尝试提炼
     if not abstract or len(abstract) < 20:
         return "摘要过短，无法提炼"
     
@@ -236,17 +151,15 @@ def send_feishu_batch(webhook_url, papers):
 def main():
     all_papers = []
     
-    for journal_key, journal_name in JOURNALS.items():
-        print(f"Fetching from {journal_key}...")
-        papers = fetch_pubmed_papers(journal_name, days=7)
+    for journal, rss_url in JOURNALS.items():
+        papers = fetch_papers_from_rss(rss_url, journal)
         
         for paper in papers:
             paper["summary"] = ai_summary(paper["title"], paper["abstract"])
             time.sleep(0.5)
         
         all_papers.extend(papers)
-        print(f"  Fetched {len(papers)} from {journal_key}")
-        time.sleep(1)
+        print(f"Fetched {len(papers)} from {journal}")
     
     # 去重
     seen_urls = set()
