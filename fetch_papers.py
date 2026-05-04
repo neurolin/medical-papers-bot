@@ -5,7 +5,7 @@ import re
 import time
 import json
 import hashlib
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # =========================
 # 期刊配置
@@ -82,18 +82,61 @@ SEEN_FILE = "seen_papers.json"
 # 工具函数
 # =========================
 
+# ... 其他函数不变 ...
+SEEN_FILE = "seen_papers.json"
+SEEN_DAYS = 3  # 只保留3天
+
 def load_seen_papers():
+    """加载已推送的文献ID（只保留最近3天）"""
     if os.path.exists(SEEN_FILE):
         try:
             with open(SEEN_FILE, 'r', encoding='utf-8') as f:
-                return set(json.load(f))
-        except:
+                data = json.load(f)
+            
+            # 新格式：带时间戳的字典
+            if isinstance(data, dict):
+                cutoff = datetime.now() - timedelta(days=SEEN_DAYS)
+                seen = set()
+                cleaned = 0
+                
+                for paper_id, timestamp_str in list(data.items()):
+                    try:
+                        timestamp = datetime.fromisoformat(timestamp_str)
+                        if timestamp > cutoff:
+                            seen.add(paper_id)
+                        else:
+                            cleaned += 1
+                            del data[paper_id]
+                    except:
+                        seen.add(paper_id)
+                
+                if cleaned > 0:
+                    print(f"  Cleaned {cleaned} old records (> {SEEN_DAYS} days)")
+                
+                return seen
+            
+            # 旧格式：纯列表（兼容，不清理）
+            elif isinstance(data, list):
+                return set(data)
+                
+        except Exception as e:
+            print(f"Error loading {SEEN_FILE}: {e}")
             return set()
+    
     return set()
 
 def save_seen_papers(seen):
+    """保存已推送的文献ID（带时间戳）"""
+    data = {}
+    now = datetime.now().isoformat()
+    
+    for paper_id in seen:
+        data[paper_id] = now
+    
     with open(SEEN_FILE, 'w', encoding='utf-8') as f:
-        json.dump(list(seen), f)
+        json.dump(data, f, indent=2)
+    
+    print(f"  Saved {len(data)} records with timestamps")
 
 def hash_id(text):
     """MD5哈希 - 用URL+标题"""
