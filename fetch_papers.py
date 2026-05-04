@@ -213,6 +213,7 @@ def fetch_pubmed(query, seen_ids):
 # =========================
 
 def fetch_journal(journal_name, config, seen_ids):
+    """抓取单个期刊：RSS优先，PubMed兜底"""
     articles = []
     
     # 逐个尝试RSS源
@@ -234,10 +235,14 @@ def fetch_journal(journal_name, config, seen_ids):
                 raw_summary = e.get("summary", "")
                 clean_summary = re.sub('<.*?>', '', raw_summary).strip()
                 
-                # RSS作者处理 - 只取前3个
+                # RSS作者处理 - Stroke只显示1个作者，其他取前3个
                 authors_raw = e.get("author", "")
-                authors_list = [a.strip() for a in authors_raw.split(",") if a.strip()]
-                authors_clean = ", ".join(authors_list[:3]) if authors_list else "Unknown"
+                if journal_name == "Stroke":
+                    authors_list = [a.strip() for a in authors_raw.split(",") if a.strip()]
+                    authors_clean = authors_list[0] if authors_list else "Unknown"
+                else:
+                    authors_list = [a.strip() for a in authors_raw.split(",") if a.strip()]
+                    authors_clean = ", ".join(authors_list[:3]) if authors_list else "Unknown"
                 
                 articles.append({
                     "id": paper_id,
@@ -261,6 +266,10 @@ def fetch_journal(journal_name, config, seen_ids):
         
         for a in pm_articles:
             a["journal"] = journal_name
+            # Stroke只显示1个作者
+            if journal_name == "Stroke":
+                authors_list = [x.strip() for x in a["authors"].split(",") if x.strip()]
+                a["authors"] = authors_list[0] if authors_list else "Unknown"
         
         articles.extend(pm_articles)
         print(f"    PubMed got {len(pm_articles)} articles")
