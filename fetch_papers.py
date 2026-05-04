@@ -83,6 +83,7 @@ SEEN_FILE = "seen_papers.json"
 # =========================
 
 def load_seen_papers():
+    """加载已推送的文献ID"""
     if os.path.exists(SEEN_FILE):
         try:
             with open(SEEN_FILE, 'r', encoding='utf-8') as f:
@@ -92,13 +93,16 @@ def load_seen_papers():
     return set()
 
 def save_seen_papers(seen):
+    """保存已推送的文献ID"""
     with open(SEEN_FILE, 'w', encoding='utf-8') as f:
         json.dump(list(seen), f)
 
 def hash_id(text):
+    """MD5哈希生成唯一ID - 只用标题"""
     return hashlib.md5(text.encode()).hexdigest()
 
 def safe_fetch_rss(url):
+    """带重试的RSS获取"""
     for i in range(3):
         try:
             feed = feedparser.parse(url)
@@ -131,6 +135,7 @@ def fetch_semantic_scholar(title, authors=""):
     return ""
 
 def fetch_pubmed(query, seen_ids):
+    """PubMed兜底：解析标题和摘要"""
     papers = []
     base = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
     
@@ -153,11 +158,14 @@ def fetch_pubmed(query, seen_ids):
             pmid = pmid_match.group(1) if pmid_match else ""
             url = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
             
-            if url in seen_ids:
-                continue
-            
+            # 标题
             title_match = re.search(r'<ArticleTitle>(.*?)</ArticleTitle>', article, re.DOTALL)
             title = re.sub('<.*?>', '', title_match.group(1)).strip() if title_match else "No title"
+            
+            # 用标题去重
+            paper_id = hash_id(title)
+            if paper_id in seen_ids:
+                continue
             
             # 摘要 - 多层提取
             abstract = ""
@@ -181,7 +189,7 @@ def fetch_pubmed(query, seen_ids):
             # 作者 - 只取前3个
             authors = []
             author_list = re.findall(r'<Author[^>]*>.*?</Author>', article, re.DOTALL)
-            for author in author_list[:3]:  # 只取前3个
+            for author in author_list[:3]:
                 lastname = re.search(r'<LastName>(.*?)</LastName>', author)
                 firstname = re.search(r'<ForeName>(.*?)</ForeName>', author)
                 
@@ -193,7 +201,7 @@ def fetch_pubmed(query, seen_ids):
             authors_str = ", ".join(authors) if authors else "Unknown"
             
             papers.append({
-                "id": hash_id(url + title),
+                "id": paper_id,
                 "journal": "",
                 "title": title,
                 "authors": authors_str,
@@ -215,19 +223,23 @@ def fetch_pubmed(query, seen_ids):
 def fetch_journal(journal_name, config, seen_ids):
     """抓取单个期刊：RSS优先，PubMed兜底"""
     articles = []
+    rss_success = False
     
-    # 逐个尝试RSS源
+    # 1️⃣ 逐个尝试RSS源
     for rss_url in config["rss"]:
         print(f"  Trying RSS: {rss_url}")
         entries = safe_fetch_rss(rss_url)
         
         if entries:
             print(f"    ✓ RSS success, got {len(entries)} entries")
+            rss_success = True
             
             for e in entries[:15]:
                 link = e.get("link", "")
                 title = e.get("title", "")
-                paper_id = hash_id(link + title)
+                
+                # 用标题去重
+                paper_id = hash_id(title)
                 
                 if paper_id in seen_ids:
                     continue
@@ -255,12 +267,13 @@ def fetch_journal(journal_name, config, seen_ids):
                     "source": "rss"
                 })
             
+            # RSS成功就跳出，不再尝试其他RSS，也不fallback到PubMed
             break
         else:
             print(f"    ✗ RSS failed")
     
-    # PubMed兜底
-    if not articles:
+    # 2️⃣ 只有RSS完全失败才用PubMed兜底
+    if not rss_success:
         print(f"  Falling back to PubMed...")
         pm_articles = fetch_pubmed(config["pubmed"], seen_ids)
         
@@ -358,7 +371,9 @@ def send_feishu_batch(webhook_url, papers):
             current_journal = paper["journal"]
             current_batch.append(f"\n📖 {current_journal}")
         
-        paper_text = f"\n📌 {paper['title']}\n👤 {paper['authors']}\n💡 {paper['summary']}\n🔗 {paper['link']}"
+        # 作者字段，为空不显示
+        authors_text = f"\n👤 {paper['authors']}" if paper['authors'] else ""
+        paper_text = f"\n📌 {paper['title']}{authors_text}\n💡 {paper['summary']}\n🔗 {paper['link']}"
         current_batch.append(paper_text)
         current_count += 1
         
@@ -417,9 +432,10 @@ def main():
         all_articles.extend(articles)
         print(f"  Total new from {journal_name}: {len(articles)}")
         
-        if not articles or articles[0].get("source") == "pubmed":
+        if not articles or (articles and articles[0].get("source") == "pubmed"):
             time.sleep(1)
     
+    # 去重（保险，虽然ID已经是标题哈希）
     unique_papers = []
     for p in all_articles:
         if p["id"] not in seen_ids:
