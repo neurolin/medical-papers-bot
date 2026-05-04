@@ -260,11 +260,13 @@ def fetch_journal(journal_name, config, seen_ids):
                 raw_summary = e.get("summary", "")
                 clean_summary = re.sub('<.*?>', '', raw_summary).strip()
                 
-                # 作者处理
+                                # 作者处理
                 authors_raw = e.get("author", "")
                 if journal_name == "Stroke":
-                    authors_list = [a.strip() for a in authors_raw.split(",") if a.strip()]
-                    authors_clean = authors_list[0] if authors_list else "Unknown"
+                    # Stroke作者格式特殊，名字连在一起无分隔，截取前两个单词
+                    clean = authors_raw.replace("Stroke Center", "").strip()
+                    words = clean.split()
+                    authors_clean = " ".join(words[:2]) if len(words) >= 2 else clean[:30]
                 else:
                     authors_list = [a.strip() for a in authors_raw.split(",") if a.strip()]
                     authors_clean = ", ".join(authors_list[:3]) if authors_list else "Unknown"
