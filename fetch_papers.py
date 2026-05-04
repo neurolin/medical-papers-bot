@@ -74,10 +74,6 @@ JOURNALS = {
     }
 }
 
-# =========================
-# 环境变量
-# =========================
-
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "").strip()
 FEISHU_WEBHOOK = os.environ.get("FEISHU_WEBHOOK", "").strip()
 SEEN_FILE = "seen_papers.json"
@@ -87,7 +83,6 @@ SEEN_FILE = "seen_papers.json"
 # =========================
 
 def load_seen_papers():
-    """加载已推送的文献ID"""
     if os.path.exists(SEEN_FILE):
         try:
             with open(SEEN_FILE, 'r', encoding='utf-8') as f:
@@ -97,16 +92,13 @@ def load_seen_papers():
     return set()
 
 def save_seen_papers(seen):
-    """保存已推送的文献ID"""
     with open(SEEN_FILE, 'w', encoding='utf-8') as f:
         json.dump(list(seen), f)
 
 def hash_id(text):
-    """MD5哈希生成唯一ID"""
     return hashlib.md5(text.encode()).hexdigest()
 
 def safe_fetch_rss(url):
-    """带重试的RSS获取"""
     for i in range(3):
         try:
             feed = feedparser.parse(url)
@@ -117,13 +109,32 @@ def safe_fetch_rss(url):
         time.sleep(2 * (i + 1))
     return []
 
+def fetch_semantic_scholar(title, authors=""):
+    """用Semantic Scholar API获取摘要（备用）"""
+    try:
+        query = title
+        url = "https://api.semanticscholar.org/graph/v1/paper/search"
+        params = {
+            "query": query,
+            "fields": "title,abstract,authors",
+            "limit": 1
+        }
+        response = requests.get(url, params=params, timeout=10)
+        data = response.json()
+        
+        if data.get("data") and len(data["data"]) > 0:
+            paper = data["data"][0]
+            return paper.get("abstract", "")
+    except Exception as e:
+        print(f"    Semantic Scholar error: {e}")
+    
+    return ""
+
 def fetch_pubmed(query, seen_ids):
-    """PubMed兜底：解析标题和摘要"""
     papers = []
     base = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
     
     try:
-        # 搜索最近10条
         search_url = f"{base}esearch.fcgi?db=pubmed&retmode=json&term={query}&retmax=10&sort=date"
         search_response = requests.get(search_url, timeout=15)
         idlist = search_response.json().get("esearchresult", {}).get("idlist", [])
@@ -131,12 +142,10 @@ def fetch_pubmed(query, seen_ids):
         if not idlist:
             return papers
         
-        # 获取详情
         fetch_url = f"{base}efetch.fcgi?db=pubmed&id={','.join(idlist)}&retmode=xml"
         fetch_response = requests.get(fetch_url, timeout=15)
         xml_content = fetch_response.text
         
-        # 解析每篇文章
         articles = re.findall(r'<PubmedArticle>(.*?)</PubmedArticle>', xml_content, re.DOTALL)
         
         for article in articles:
@@ -147,38 +156,38 @@ def fetch_pubmed(query, seen_ids):
             if url in seen_ids:
                 continue
             
-            # 标题
             title_match = re.search(r'<ArticleTitle>(.*?)</ArticleTitle>', article, re.DOTALL)
             title = re.sub('<.*?>', '', title_match.group(1)).strip() if title_match else "No title"
             
             # 摘要 - 多层提取
             abstract = ""
             
-            # 方法1: AbstractText标签
             abstract_texts = re.findall(r'<AbstractText[^>]*>(.*?)</AbstractText>', article, re.DOTALL)
             if abstract_texts:
                 abstract = ' '.join([re.sub('<.*?>', ' ', t).strip() for t in abstract_texts])
             
-            # 方法2: 整个Abstract
             if not abstract:
                 abstract_match = re.search(r'<Abstract>(.*?)</Abstract>', article, re.DOTALL)
                 if abstract_match:
                     abstract = re.sub('<.*?>', ' ', abstract_match.group(1))
                     abstract = ' '.join(abstract.split())
             
-            # 方法3: OtherAbstract
             if not abstract:
                 other_abstract = re.search(r'<OtherAbstract[^>]*>(.*?)</OtherAbstract>', article, re.DOTALL)
                 if other_abstract:
                     abstract = re.sub('<.*?>', ' ', other_abstract.group(1))
                     abstract = ' '.join(abstract.split())
             
-            # 作者
+            # 作者 - 只取前3个
             authors = []
             author_list = re.findall(r'<Author[^>]*>.*?</Author>', article, re.DOTALL)
-            for author in author_list[:3]:
+            for author in author_list[:3]:  # 只取前3个
                 lastname = re.search(r'<LastName>(.*?)</LastName>', author)
-                if lastname:
+                firstname = re.search(r'<ForeName>(.*?)</ForeName>', author)
+                
+                if lastname and firstname:
+                    authors.append(f"{firstname.group(1)} {lastname.group(1)}")
+                elif lastname:
                     authors.append(lastname.group(1))
             
             authors_str = ", ".join(authors) if authors else "Unknown"
@@ -204,10 +213,9 @@ def fetch_pubmed(query, seen_ids):
 # =========================
 
 def fetch_journal(journal_name, config, seen_ids):
-    """抓取单个期刊：RSS优先，PubMed兜底"""
     articles = []
     
-    # 1️⃣ 逐个尝试RSS源
+    # 逐个尝试RSS源
     for rss_url in config["rss"]:
         print(f"  Trying RSS: {rss_url}")
         entries = safe_fetch_rss(rss_url)
@@ -215,7 +223,7 @@ def fetch_journal(journal_name, config, seen_ids):
         if entries:
             print(f"    ✓ RSS success, got {len(entries)} entries")
             
-            for e in entries[:15]:  # 取前15条
+            for e in entries[:15]:
                 link = e.get("link", "")
                 title = e.get("title", "")
                 paper_id = hash_id(link + title)
@@ -226,23 +234,27 @@ def fetch_journal(journal_name, config, seen_ids):
                 raw_summary = e.get("summary", "")
                 clean_summary = re.sub('<.*?>', '', raw_summary).strip()
                 
+                # RSS作者处理 - 只取前3个
+                authors_raw = e.get("author", "")
+                authors_list = [a.strip() for a in authors_raw.split(",") if a.strip()]
+                authors_clean = ", ".join(authors_list[:3]) if authors_list else "Unknown"
+                
                 articles.append({
                     "id": paper_id,
                     "journal": journal_name,
                     "title": title,
-                    "authors": e.get("author", "Unknown"),
+                    "authors": authors_clean,
                     "summary": clean_summary,
                     "link": link,
                     "published": e.get("published", ""),
                     "source": "rss"
                 })
             
-            # RSS成功就跳出，不用PubMed
             break
         else:
             print(f"    ✗ RSS failed")
     
-    # 2️⃣ PubMed兜底
+    # PubMed兜底
     if not articles:
         print(f"  Falling back to PubMed...")
         pm_articles = fetch_pubmed(config["pubmed"], seen_ids)
@@ -259,13 +271,18 @@ def fetch_journal(journal_name, config, seen_ids):
 # AI摘要
 # =========================
 
-def ai_summary(title, abstract):
-    """调用DeepSeek API生成核心摘要"""
+def ai_summary(title, abstract, journal_name=""):
     if not DEEPSEEK_API_KEY:
         return "【未配置API】"
     
+    # 如果PubMed没摘要，尝试Semantic Scholar
     if not abstract or len(abstract) < 10:
-        return "【PubMed未提供摘要，请阅读原文】"
+        print(f"    PubMed无摘要，尝试Semantic Scholar...")
+        abstract = fetch_semantic_scholar(title)
+    
+    # 如果还是没摘要
+    if not abstract or len(abstract) < 10:
+        return "【未找到摘要，请阅读原文】"
     
     clean_abstract = abstract[:2000]
     
@@ -316,7 +333,6 @@ def ai_summary(title, abstract):
 # =========================
 
 def send_feishu_batch(webhook_url, papers):
-    """分批发送，每批最多5篇"""
     date_str = datetime.now().strftime("%Y-%m-%d")
     
     if not papers:
@@ -381,24 +397,20 @@ def main():
     
     all_articles = []
     
-    # 逐个期刊抓取
     for journal_name, config in JOURNALS.items():
         print(f"\nFetching {journal_name}...")
         articles = fetch_journal(journal_name, config, seen_ids)
         
-        # AI摘要
         for a in articles:
-            a["summary"] = ai_summary(a["title"], a["summary"])
+            a["summary"] = ai_summary(a["title"], a["summary"], journal_name)
             time.sleep(0.5)
         
         all_articles.extend(articles)
         print(f"  Total new from {journal_name}: {len(articles)}")
         
-        # PubMed频率限制
         if not articles or articles[0].get("source") == "pubmed":
             time.sleep(1)
     
-    # 去重
     unique_papers = []
     for p in all_articles:
         if p["id"] not in seen_ids:
@@ -413,7 +425,6 @@ def main():
         save_seen_papers(seen_ids)
         return
     
-    # 推送飞书
     if not FEISHU_WEBHOOK:
         print("❌ 未配置 FEISHU_WEBHOOK")
         return
