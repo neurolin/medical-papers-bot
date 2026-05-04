@@ -3,6 +3,7 @@ import requests
 import feedparser
 import re
 import time
+import json
 from datetime import datetime
 
 # ===== 期刊RSS配置 =====
@@ -21,28 +22,60 @@ JOURNALS = {
 
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "").strip()
 
-def fetch_papers_from_rss(rss_url, journal_name):
-    """从RSS源获取论文"""
+# 已推送文献记录文件
+SEEN_FILE = "seen_papers.json"
+
+def load_seen_papers():
+    """加载已推送的文献ID"""
+    if os.path.exists(SEEN_FILE):
+        try:
+            with open(SEEN_FILE, 'r', encoding='utf-8') as f:
+                return set(json.load(f))
+        except:
+            return set()
+    return set()
+
+def save_seen_papers(seen):
+    """保存已推送的文献ID"""
+    with open(SEEN_FILE, 'w', encoding='utf-8') as f:
+        json.dump(list(seen), f)
+
+def fetch_papers_from_rss(rss_url, journal_name, seen_ids):
+    """从RSS源获取新论文（排除已推送的）"""
     papers = []
+    new_count = 0
+    
     try:
         feed = feedparser.parse(rss_url)
-        for entry in feed.entries[:10]:
-            raw_summary = entry.get("summary", "")
+        
+        for entry in feed.entries[:15]:  # 多取一些
+            # 用URL作为唯一ID
+            paper_id = entry.get("link", "")
+            if not paper_id:
+                continue
             
-            # 清理HTML标签
+            # 跳过已推送的
+            if paper_id in seen_ids:
+                continue
+            
+            new_count += 1
+            
+            raw_summary = entry.get("summary", "")
             clean_summary = re.sub('<.*?>', '', raw_summary).strip()
             
-            paper = {
+            papers.append({
                 "title": entry.get("title", "No title"),
                 "authors": entry.get("author", "Unknown"),
-                "url": entry.get("link", ""),
+                "url": paper_id,
                 "published": entry.get("published", ""),
                 "abstract": clean_summary,
                 "journal": journal_name
-            }
-            papers.append(paper)
+            })
+            
     except Exception as e:
         print(f"Error fetching {journal_name}: {e}")
+    
+    print(f"  Total: {len(feed.entries)}, New: {new_count}")
     return papers
 
 def ai_summary(title, abstract):
@@ -103,6 +136,10 @@ def send_feishu_batch(webhook_url, papers):
     """分批发送，每批最多5篇"""
     date_str = datetime.now().strftime("%Y-%m-%d")
     
+    if not papers:
+        print("No new papers to send.")
+        return False
+    
     batches = []
     current_batch = [f"📚 医学文献日报 - {date_str}\n"]
     current_count = 0
@@ -125,6 +162,7 @@ def send_feishu_batch(webhook_url, papers):
     if current_batch:
         batches.append("\n".join(current_batch))
     
+    success = True
     for i, batch in enumerate(batches, 1):
         message = {
             "msg_type": "text",
@@ -139,40 +177,49 @@ def send_feishu_batch(webhook_url, papers):
                 print(f"✅ 第 {i}/{len(batches)} 批发送成功")
             else:
                 print(f"❌ 第 {i} 批失败: {result}")
+                success = False
                 
         except Exception as e:
             print(f"❌ 请求失败: {e}")
+            success = False
         
         if i < len(batches):
             time.sleep(1)
     
-    print(f"\n✅ 全部完成！共 {len(papers)} 篇，分 {len(batches)} 条消息")
+    print(f"\n✅ 推送完成！共 {len(papers)} 篇新文献")
+    return success
 
 def main():
+    # 加载已推送记录
+    seen_ids = load_seen_papers()
+    print(f"Previously seen: {len(seen_ids)} papers")
+    
     all_papers = []
     
     for journal, rss_url in JOURNALS.items():
-        papers = fetch_papers_from_rss(rss_url, journal)
+        print(f"Fetching from {journal}...")
+        papers = fetch_papers_from_rss(rss_url, journal, seen_ids)
         
         for paper in papers:
             paper["summary"] = ai_summary(paper["title"], paper["abstract"])
             time.sleep(0.5)
         
         all_papers.extend(papers)
-        print(f"Fetched {len(papers)} from {journal}")
+        print(f"  Fetched {len(papers)} new from {journal}")
     
-    # 去重
-    seen_urls = set()
+    # 去重（保险）
     unique_papers = []
     for p in all_papers:
-        if p["url"] not in seen_urls:
-            seen_urls.add(p["url"])
+        if p["url"] not in seen_ids:
+            seen_ids.add(p["url"])
             unique_papers.append(p)
     
-    print(f"\nTotal unique papers: {len(unique_papers)}")
+    print(f"\nTotal new papers: {len(unique_papers)}")
     
     if not unique_papers:
-        print("No papers found today.")
+        print("No new papers today.")
+        # 仍然保存记录（防止文件丢失）
+        save_seen_papers(seen_ids)
         return
     
     webhook = os.environ.get("FEISHU_WEBHOOK", "").strip()
@@ -180,7 +227,15 @@ def main():
         print("❌ 未配置 FEISHU_WEBHOOK")
         return
     
-    send_feishu_batch(webhook, unique_papers)
+    # 发送飞书
+    success = send_feishu_batch(webhook, unique_papers)
+    
+    # 只有发送成功才保存记录（失败可重试）
+    if success:
+        save_seen_papers(seen_ids)
+        print(f"✅ 已保存 {len(seen_ids)} 条记录")
+    else:
+        print("⚠️ 发送失败，未更新记录，可重试")
 
 if __name__ == "__main__":
     main()
